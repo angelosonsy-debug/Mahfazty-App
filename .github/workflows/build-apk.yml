@@ -1,0 +1,59 @@
+name: Build Mahfazty APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Generate base Flutter/Android project skeleton
+        run: flutter create --platforms=android --org com.mahfazty --project-name trial temp_app
+
+      - name: Overlay our custom source files
+        run: |
+          rm -rf temp_app/lib
+          cp -r lib temp_app/lib
+          rm -f temp_app/test/widget_test.dart
+          mkdir -p temp_app/test
+          cp test/*.dart temp_app/test/
+          cp android_overrides/AndroidManifest.xml temp_app/android/app/src/main/AndroidManifest.xml
+          cp android_overrides/kotlin/MainActivity.kt temp_app/android/app/src/main/kotlin/com/mahfazty/trial/MainActivity.kt
+          cp android_overrides/kotlin/MahfaztyNotificationListener.kt temp_app/android/app/src/main/kotlin/com/mahfazty/trial/MahfaztyNotificationListener.kt
+          cp android_overrides/kotlin/SmsReceiver.kt temp_app/android/app/src/main/kotlin/com/mahfazty/trial/SmsReceiver.kt
+
+      - name: Add dependencies (flutter_localizations, shared_preferences, http)
+        working-directory: temp_app
+        run: |
+          flutter pub add flutter_localizations --sdk=flutter
+          flutter pub add shared_preferences
+          flutter pub add http
+
+      - name: Get packages
+        working-directory: temp_app
+        run: flutter pub get
+
+      - name: Run unit tests
+        working-directory: temp_app
+        run: flutter test
+
+      - name: Build release APK
+        working-directory: temp_app
+        run: flutter build apk --release
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mahfazty-apk
+          path: temp_app/build/app/outputs/flutter-apk/app-release.apk
