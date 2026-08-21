@@ -53,8 +53,22 @@ class LocalStore {
     // ده هنا، أي إعادة تحميل (Reload/إعادة فتح التطبيق) كانت بتدي
     // FinancialEngine._recomputeWallets() القايمة بترتيب معكوس، فيحسب
     // آخر رصيد يدوي غلط (بيرجع لأول قيمة اتحطت بدل آخر واحدة).
-    events.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    return events;
+    //
+    // Bug Fix: الاعتماد على timestamp لوحده مش كافي. لو حصلت أكتر من
+    // setWalletBalanceManually (أو أي ingest) ورا بعض بسرعة كبيرة (زي في
+    // التيستات، أو حتى في الاستخدام الحقيقي على جهاز سريع)، ممكن يجيلهم
+    // نفس الـ millisecond بالظبط. List.sort في Dart مش مضمون إنه stable،
+    // فوقت التعادل ده الترتيب بينهم بيبقى غير محدد - ده اللي كان بيخلي
+    // آخر تعديل يدوي أحيانًا يضيع ويرجع رصيد أقدم بدل الأحدث. الحل: نضيف
+    // ترتيب الإضافة الأصلي (index في التخزين، اللي فعلاً زمني صح لأننا
+    // بنعمل .add() بس) كـ tiebreaker، فمفيش تعادل حقيقي يوصل لـ sort خالص.
+    final indices = List<int>.generate(events.length, (i) => i);
+    indices.sort((ia, ib) {
+      final cmp = events[ib].timestamp.compareTo(events[ia].timestamp);
+      if (cmp != 0) return cmp;
+      return ib.compareTo(ia); // وقت التعادل: اللي اتضاف بعدين (index أكبر) يطلع فوق
+    });
+    return indices.map((i) => events[i]).toList();
   }
 
   Future<void> _saveAllEvents(List<FinancialEvent> events) async {
@@ -87,8 +101,14 @@ class LocalStore {
     if (raw == null) return [];
     final list = jsonDecode(raw) as List;
     final clients = list.map((e) => Client.fromJson(e as Map<String, dynamic>)).toList();
-    clients.sort((a, b) => b.createdAt.compareTo(a.createdAt)); // نفس السبب - أحدث عميل أولًا
-    return clients;
+    // نفس سبب loadEvents بالظبط: تعادل في createdAt ممكن يحصل، وsort مش stable.
+    final indices = List<int>.generate(clients.length, (i) => i);
+    indices.sort((ia, ib) {
+      final cmp = clients[ib].createdAt.compareTo(clients[ia].createdAt);
+      if (cmp != 0) return cmp;
+      return ib.compareTo(ia);
+    });
+    return indices.map((i) => clients[i]).toList();
   }
 
   Future<void> _saveAllClients(List<Client> clients) async {
@@ -123,8 +143,14 @@ class LocalStore {
     if (raw == null) return [];
     final list = jsonDecode(raw) as List;
     final transactions = list.map((e) => DebtTransaction.fromJson(e as Map<String, dynamic>)).toList();
-    transactions.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    return transactions;
+    // نفس سبب loadEvents بالظبط: تعادل في timestamp ممكن يحصل، وsort مش stable.
+    final indices = List<int>.generate(transactions.length, (i) => i);
+    indices.sort((ia, ib) {
+      final cmp = transactions[ib].timestamp.compareTo(transactions[ia].timestamp);
+      if (cmp != 0) return cmp;
+      return ib.compareTo(ia);
+    });
+    return indices.map((i) => transactions[i]).toList();
   }
 
   Future<void> _saveAllDebtTransactions(List<DebtTransaction> transactions) async {
@@ -157,8 +183,14 @@ class LocalStore {
     if (raw == null) return [];
     final list = jsonDecode(raw) as List;
     final rows = list.map((e) => PocketAdjustmentRow.fromJson(e as Map<String, dynamic>)).toList();
-    rows.sort((a, b) => b.timestamp.compareTo(a.timestamp)); // نفس سبب الأحداث المالية بالظبط
-    return rows;
+    // نفس سبب الأحداث المالية بالظبط: تعادل في timestamp ممكن يحصل، وsort مش stable.
+    final indices = List<int>.generate(rows.length, (i) => i);
+    indices.sort((ia, ib) {
+      final cmp = rows[ib].timestamp.compareTo(rows[ia].timestamp);
+      if (cmp != 0) return cmp;
+      return ib.compareTo(ia);
+    });
+    return indices.map((i) => rows[i]).toList();
   }
 
   Future<void> addPocketAdjustment(String id, double delta, String? note) async {
