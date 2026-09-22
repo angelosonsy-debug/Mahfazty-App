@@ -1,0 +1,31 @@
+name: trial
+description: "محفظتي — مدير مالي شخصي لمصر."
+publish_to: 'none'
+
+# مصدر واحد لرقم الإصدار: Flutter بيربط versionName بالجزء قبل "+"
+# وversionCode بالجزء بعد "+" تلقائيًا في android/app/build.gradle
+# (flutter.versionName / flutter.versionCode). لرفع إصدار جديد على
+# Google Play: غيّر السطر ده بس (مثلاً 1.0.1+2) — من غير أي تعديل تاني
+# في أي ملف Gradle.
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.9.0 <4.0.0'
+  flutter: '>=3.44.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  shared_preferences: ^2.5.3
+  http: ^1.5.0
+  provider: ^6.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

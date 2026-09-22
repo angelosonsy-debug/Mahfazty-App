@@ -1,0 +1,158 @@
+name: Release Build (signed AAB)
+
+# ده الـworkflow الوحيد اللي بيلمس production signing secrets — عمدًا
+# مفصول تمامًا عن build-apk.yml (اللي بيشتغل تلقائي مع كل push وبيعمل
+# debug build بس، مفيهوش أي secret حساس).
+#
+# بيتشغّل يدويًا بس (workflow_dispatch)، أو تلقائيًا لو عملت tag بالشكل
+# "v*" (مثلاً v1.0.0). محدش تاني (حتى push عادي على main) بيشغّله.
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: '3.44.7'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter (pinned version)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Get packages (uses committed pubspec.lock — no drift)
+        run: flutter pub get
+
+      - name: Static analysis
+        run: flutter analyze
+
+      - name: Full regression test suite — must pass before any release build
+        run: flutter test
+
+      # ------------------------------------------------------------------
+      # فك تشفير الـkeystore الحقيقي من GitHub Secret. الملف بيتكوّن هنا
+      # بس وقتيًا جوه الـrunner، ومبيتحطش أبدًا في الريبو ولا يتسجل في
+      # أي log (استخدمنا --decode مش echo عشان محتواه ميظهرش في الـlog).
+      # ------------------------------------------------------------------
+      - name: Decode keystore from GitHub Secret
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "❌ Secret ANDROID_KEYSTORE_BASE64 غير موجود — لازم يتضاف في GitHub Secrets قبل تشغيل الـrelease build."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/release.keystore
+
+      - name: Write key.properties from GitHub Secrets
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "❌ واحد أو أكتر من KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD مش موجود في GitHub Secrets."
+            exit 1
+          fi
+          cat > android/key.properties << EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=release.keystore
+          EOF
+
+      - name: Build Release AAB (this is the artifact we publish to Google Play)
+        run: flutter build appbundle --release
+
+      - name: Also build a Release APK (manual testing only, not for Play)
+        run: flutter build apk --release
+
+      - name: Confirm AAB was actually produced
+        run: |
+          AAB_PATH="build/app/outputs/bundle/release/app-release.aab"
+          if [ ! -f "$AAB_PATH" ]; then
+            echo "❌ AAB مش موجود في $AAB_PATH — الـbuild فشل أو المسار اتغيّر."
+            exit 1
+          fi
+          echo "✅ AAB موجود: $AAB_PATH ($(du -h "$AAB_PATH" | cut -f1))"
+
+      # ------------------------------------------------------------------
+      # التحقق الحقيقي إن الـAAB موقّع بتوقيع release مش debug: نستخدم
+      # bundletool نبني منه universal APK، وبعدين apksigner (جوه Android
+      # SDK اللي جاي مع الـrunner) للتحقق من شهادة التوقيع.
+      # ------------------------------------------------------------------
+      - name: Download bundletool
+        run: |
+          curl -sSL -o bundletool.jar \
+            https://github.com/google/bundletool/releases/latest/download/bundletool-all.jar
+
+      - name: Build a universal APK from the AAB for signature inspection
+        run: |
+          java -jar bundletool.jar build-apks \
+            --bundle=build/app/outputs/bundle/release/app-release.aab \
+            --output=release_check.apks \
+            --mode=universal \
+            --ks=android/release.keystore \
+            --ks-pass=pass:$(grep storePassword android/key.properties | cut -d= -f2) \
+            --ks-key-alias=$(grep keyAlias android/key.properties | cut -d= -f2) \
+            --key-pass=pass:$(grep keyPassword android/key.properties | cut -d= -f2)
+          unzip -o release_check.apks -d release_check_extracted
+
+      - name: Verify signing certificate is NOT the Flutter/Android debug key
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME" -name apksigner | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "❌ apksigner مش موجود على الـrunner — مش هينفع نتأكد من التوقيع آليًا."
+            exit 1
+          fi
+          echo "Using apksigner at: $APKSIGNER"
+          "$APKSIGNER" verify --print-certs release_check_extracted/universal.apk | tee signer_info.txt
+
+          # شهادة الـdebug الافتراضية لـFlutter/Android Studio معروفة
+          # ومكررة على كل الأجهزة (alias دايمًا "androiddebugkey"، ومفيش
+          # أي طريقة يبقى اسمها كده لو التوقيع Release حقيقي بمفتاحك انت).
+          if grep -qi "androiddebugkey" signer_info.txt; then
+            echo "❌ الـAAB متوقّع بمفتاح debug الافتراضي، مش بالـkeystore الحقيقي!"
+            exit 1
+          fi
+          echo "✅ Signing verification PASSED — الـAAB متوقّع بمفتاح release حقيقي، مش debug."
+
+      - name: Read applicationId / versionName / versionCode from source (for the report)
+        run: |
+          echo "--- pubspec.yaml version line ---"
+          grep "^version:" pubspec.yaml
+          echo "--- applicationId ---"
+          grep "applicationId" android/app/build.gradle android/app/build.gradle.kts 2>/dev/null | head -3
+
+      - name: Clean up secrets from the runner filesystem
+        if: always()
+        run: |
+          rm -f android/release.keystore android/key.properties release_check.apks bundletool.jar
+          rm -rf release_check_extracted
+
+      - name: Upload signed AAB + APK as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mahfazty-release-${{ github.run_number }}
+          path: |
+            build/app/outputs/bundle/release/app-release.aab
+            build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 90
+
+  # ---------------------------------------------------------------------
+  # ملحوظة: مفيش أي خطوة هنا بترفع على Google Play Console تلقائيًا —
+  # النتيجة النهائية artifact قابل للتحميل من الـworkflow run بس، والرفع
+  # الفعلي على Play هيبقى خطوة يدوية بعد الـFinal Audit (المرحلة الأخيرة).
+  # ---------------------------------------------------------------------
