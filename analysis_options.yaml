@@ -1,0 +1,7 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # لا نضيف قواعد صارمة جديدة في هذه المرحلة (C4 هدفها تثبيت البناء
+    # بس، مش تغيير سلوك الكود) — القواعد الافتراضية من flutter_lints
+    # كفاية دلوقتي.

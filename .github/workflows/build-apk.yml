@@ -1,0 +1,109 @@
+name: Build Mahfazty
+
+# ملحوظة مهمة: هذا الـ workflow مش بيعمل "flutter create" ولا "flutter
+# pub add" إطلاقًا — المشروع نفسه (pubspec.yaml, pubspec.lock, android/)
+# موجود بالفعل جوه الريبو (اتولّد مرة واحدة عبر bootstrap-android.yml).
+# أي تشغيل هنا بياخد نفس الكود بالظبط ونفس نسخ الحزم بالظبط في كل مرة.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+env:
+  # لازم تتطابق دايمًا مع النسخة المستخدمة وقت آخر تشغيل لـ
+  # bootstrap-android.yml
+  FLUTTER_VERSION: '3.44.7'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter (pinned version — same version every run)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Get packages (uses the committed pubspec.lock — no resolution drift)
+        run: flutter pub get
+
+      - name: Static analysis
+        run: flutter analyze
+
+      - name: Run unit tests
+        run: flutter test
+
+      - name: Bootstrap android/ if missing (first-time setup)
+        run: |
+          if [ ! -d "android" ]; then
+            echo "ℹ android/ not found — running bootstrap (first-time setup)..."
+            flutter create --platforms=android --org com.mahfazty --project-name trial /tmp/bootstrap_app
+            cp -r /tmp/bootstrap_app/android android
+            cp android_overrides/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+            mkdir -p android/app/src/main/kotlin/com/mahfazty/trial
+            cp android_overrides/kotlin/MainActivity.kt android/app/src/main/kotlin/com/mahfazty/trial/MainActivity.kt
+            cp android_overrides/kotlin/MahfaztyNotificationListener.kt android/app/src/main/kotlin/com/mahfazty/trial/MahfaztyNotificationListener.kt
+            cp android_overrides/kotlin/SmsReceiver.kt android/app/src/main/kotlin/com/mahfazty/trial/SmsReceiver.kt
+            BUILD_GRADLE="android/app/build.gradle.kts"
+            [ ! -f "$BUILD_GRADLE" ] && BUILD_GRADLE="android/app/build.gradle"
+            sed -i               -e 's/flutter\.compileSdkVersion/36/g'               -e 's/flutter\.targetSdkVersion/36/g'               -e 's/flutter\.minSdkVersion/23/g'               "$BUILD_GRADLE"
+            python3 tool/apply_release_signing.py
+            echo "✅ android/ bootstrapped successfully"
+          else
+            echo "✅ android/ already present"
+          fi
+
+      - name: Build debug APK (for quick testing on a real device)
+        run: flutter build apk --debug
+
+      - name: Upload debug APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mahfazty-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+
+  # ---------------------------------------------------------------------
+  # ملحوظة: بناء الـ release (APK/AAB موقّع) هيتضاف في المرحلة الجاية
+  # (C2 — Release Signing + Versioning). هذه المرحلة (C4) بتنتج APK
+  # debug بس، للتأكد إن الـ pipeline نفسه ثابت وقابل لإعادة الإنتاج.
+  # ---------------------------------------------------------------------
+
+  reproducibility_check:
+    # وظيفة منفصلة (بيئة نظيفة تانية) بتتأكد إن حل الـ dependencies نفس
+    # الحل بالظبط تاني مرة، بدل ما نفترض. مش هنقارن الـ APK binary
+    # حرفيًا (بيئة الـ build نفسها بتضيف timestamps/paths مختلفة كل
+    # تشغيل، ده طبيعي)، لكن بنثبت إن المصدر + نسخ الحزم + نسخة Flutter
+    # كلهم ثابتين 100%.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter (same pinned version)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Confirm Flutter version matches the pin exactly
+        run: |
+          flutter --version | tee /tmp/flutter_version.txt
+          grep -q "${{ env.FLUTTER_VERSION }}" /tmp/flutter_version.txt || (echo "❌ Flutter version mismatch!" && exit 1)
+
+      - name: pub get (generate lock if missing, verify if present)
+        run: |
+          if [ -f pubspec.lock ]; then
+            cp pubspec.lock /tmp/pubspec.lock.before
+            flutter pub get
+            diff /tmp/pubspec.lock.before pubspec.lock \
+              && echo "✅ pubspec.lock unchanged — deterministic" \
+              || (echo "❌ pubspec.lock drifted!" && exit 1)
+          else
+            echo "ℹ pubspec.lock not yet committed — run bootstrap-android.yml first"
+            flutter pub get
+          fi

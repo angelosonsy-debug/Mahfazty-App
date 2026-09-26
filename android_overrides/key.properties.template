@@ -1,0 +1,13 @@
+# انسخ هذا الملف باسم android/key.properties على جهازك الشخصي فقط —
+# أو خليه يتكوّن تلقائيًا وقت الـ CI من GitHub Secrets (الطريقة
+# الموصى بيها، ومطبّقة فعليًا في .github/workflows/release-build.yml).
+#
+# ⚠️ هذا الملف Template للتوثيق بس — لا يحتوي على أي قيمة حقيقية،
+# ولا يجب أبدًا رفع نسخة فيها قيم حقيقية إلى GitHub أو أي مكان عام.
+# android/key.properties (النسخة الحقيقية) موجودة في .gitignore
+# دايمًا ومتترفعش للريبو أبدًا.
+
+storePassword=REPLACE_WITH_KEYSTORE_PASSWORD
+keyPassword=REPLACE_WITH_KEY_PASSWORD
+keyAlias=REPLACE_WITH_KEY_ALIAS
+storeFile=REPLACE_WITH_PATH_TO_KEYSTORE_FILE

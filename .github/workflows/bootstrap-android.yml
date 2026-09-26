@@ -1,0 +1,93 @@
+name: Bootstrap Android Project (run once)
+
+# هذا الـ workflow بيتشغّل يدويًا بس (مش على كل push) — مهمته الوحيدة:
+# توليد مشروع Flutter/Android حقيقي مرة واحدة، ولزقه دائمًا داخل الريبو
+# (android/, pubspec.lock)، بحيث الـ workflow التاني (build-apk.yml)
+# ميحتاجش "flutter create" أو "flutter pub add" تاني إطلاقًا.
+#
+# شغّله مرة واحدة الآن، وبعد كده مرة تانية بس لو حبينا نغيّر نسخة
+# Flutter نفسها مستقبلًا (نادر) — مش جزء من دورة التطوير العادية.
+
+on:
+  workflow_dispatch: {}
+
+# صلاحية الكتابة مطلوبة عشان الخطوة الأخيرة تعمل commit للنتيجة
+permissions:
+  contents: write
+
+env:
+  # نفس النسخة المثبتة في build-apk.yml — لازم تتطابق دايمًا
+  FLUTTER_VERSION: '3.44.7'
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter (pinned version)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Generate a fresh Flutter/Android skeleton in a temp folder
+        run: |
+          flutter create --platforms=android --org com.mahfazty --project-name trial /tmp/bootstrap_app
+
+      - name: Copy the real Android project into the repo
+        run: |
+          rm -rf android
+          cp -r /tmp/bootstrap_app/android android
+
+      - name: Apply our custom Android overrides (manifest + Kotlin files)
+        run: |
+          cp android_overrides/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/kotlin/com/mahfazty/trial
+          cp android_overrides/kotlin/MainActivity.kt android/app/src/main/kotlin/com/mahfazty/trial/MainActivity.kt
+          cp android_overrides/kotlin/MahfaztyNotificationListener.kt android/app/src/main/kotlin/com/mahfazty/trial/MahfaztyNotificationListener.kt
+          cp android_overrides/kotlin/SmsReceiver.kt android/app/src/main/kotlin/com/mahfazty/trial/SmsReceiver.kt
+
+      - name: Pin compileSdk / targetSdk / minSdk explicitly (Google Play 2026 requirement)
+        run: |
+          BUILD_GRADLE="android/app/build.gradle.kts"
+          if [ ! -f "$BUILD_GRADLE" ]; then
+            BUILD_GRADLE="android/app/build.gradle"
+          fi
+          echo "Patching $BUILD_GRADLE"
+          # نستبدل أي إشارة لـ flutter.compileSdkVersion / flutter.targetSdkVersion
+          # / flutter.minSdkVersion بأرقام صريحة ثابتة، بدل الاعتماد على
+          # افتراضيات Flutter الداخلية اللي ممكن تتغير مع كل نسخة.
+          sed -i \
+            -e 's/flutter\.compileSdkVersion/36/g' \
+            -e 's/flutter\.targetSdkVersion/36/g' \
+            -e 's/flutter\.minSdkVersion/23/g' \
+            "$BUILD_GRADLE"
+          echo "--- Result ---"
+          grep -n "Sdk" "$BUILD_GRADLE" || true
+
+      - name: Add real release signing config (C2) + key.properties template
+        run: |
+          python3 tool/apply_release_signing.py
+          cp android_overrides/key.properties.template android/key.properties.template
+          # key.properties الحقيقي (لو حد أنشأه محليًا) ميترفعش للريبو أبدًا
+          if ! grep -qxF "android/key.properties" .gitignore 2>/dev/null; then
+            printf '\n# Release signing secret — never commit the real file\nandroid/key.properties\n*.keystore\n*.jks\n' >> .gitignore
+          fi
+
+      - name: flutter pub get (generates the real pubspec.lock)
+        run: flutter pub get
+
+      - name: Sanity check — analyze + test on the bootstrapped project
+        run: |
+          flutter analyze
+          flutter test
+
+      - name: Commit the bootstrapped project back to the repo
+        run: |
+          git config user.name "mahfazty-bootstrap-bot"
+          git config user.email "actions@github.com"
+          git add android pubspec.lock .gitignore
+          git diff --cached --quiet && echo "No changes to commit" || git commit -m "chore: bootstrap real Flutter/Android project + release signing config (automated, C4+C2)"
+          git push
