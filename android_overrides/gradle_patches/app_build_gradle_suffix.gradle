@@ -1,0 +1,12 @@
+// mahfazty: flutter_local_notifications requires core library desugaring
+// (نفس الشرح في النسخة .kts)
+android {
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+}
+

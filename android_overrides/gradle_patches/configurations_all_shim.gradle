@@ -1,0 +1,49 @@
+// mahfazty: google_mobile_ads Gradle 8.11+ compatibility shim
+// ─────────────────────────────────────────────────────────────────────
+// بعض نسخ google_mobile_ads القديمة بتستخدم configurations.all اللي
+// اتشالت من Gradle 8.11+. الخطأ الفعلي اللي ظهر كان:
+//   "Could not get unknown property 'all' for configuration container"
+// وده تحديدًا رسالة Groovy الخاصة بفشل الوصول كـ property (property
+// getter)، مش method call بـ closure. ده معناه إن الكود الحقيقي في
+// المكتبة بيستخدم الصيغة القديمة دي:
+//     configurations.all.each { configuration -> ... }
+// (يعني configurations.all من غير أقواس ولا closure مباشرة بعدها —
+// property access مجرّد بيرجّع المجموعة كلها، وبعدين .each/.find/...
+// عليها) — مش الصيغة الشائعة التانية:
+//     configurations.all { configuration -> ... }
+// (method call بـ closure واحد).
+//
+// عشان كده بنضيف الاتنين:
+//   • getAll()  → عشان `configurations.all` (property access) يشتغل
+//     ويرجّع الـ container نفسه (اللي أصلاً Iterable/Collection-like،
+//     فأي .each{}/.find{}/... بعدها هيشتغل عادي).
+//   • all(Closure) → عشان `configurations.all { ... }` (method call)
+//     يشتغل كمان لو اتستخدم في مكان تاني، كـ alias لـ configureEach.
+//
+// الحل ده مش بيحاول يخمّن شكل كود المكتبة بالظبط (مسافات/أسطر/تنسيق)
+// زي أي محاولة نص-patching — بيرجّع الـ API نفسها تاني، فالكود يشتغل
+// زي ما هو مهما كان شكله.
+
+void applyShim(Class<?> targetClass, String label) {
+    try {
+        targetClass.metaClass.getAll = { -> delegate }
+        targetClass.metaClass.all = { Closure closure ->
+            delegate.configureEach(closure)
+            return null
+        }
+        println "[mahfazty] Added configurations.all property+method shim on ${label}"
+    } catch (Throwable t) {
+        println "[mahfazty] WARNING: could not patch ${label}: ${t.message}"
+    }
+}
+
+applyShim(org.gradle.api.artifacts.ConfigurationContainer, 'ConfigurationContainer (interface)')
+
+try {
+    applyShim(
+        Class.forName('org.gradle.api.internal.artifacts.configurations.DefaultConfigurationContainer'),
+        'DefaultConfigurationContainer (impl)'
+    )
+} catch (Throwable t) {
+    println "[mahfazty] WARNING: DefaultConfigurationContainer class not found: ${t.message}"
+}
