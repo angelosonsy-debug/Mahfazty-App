@@ -1,11 +1,9 @@
 name: Release Build (signed AAB)
 
-# ده الـworkflow الوحيد اللي بيلمس production signing secrets — عمدًا
-# مفصول تمامًا عن build-apk.yml (اللي بيشتغل تلقائي مع كل push وبيعمل
-# debug build بس، مفيهوش أي secret حساس).
-#
-# بيتشغّل يدويًا بس (workflow_dispatch)، أو تلقائيًا لو عملت tag بالشكل
-# "v*" (مثلاً v1.0.0). محدش تاني (حتى push عادي على main) بيشغّله.
+# Release workflow:
+# - Runs manually or when a v* tag is pushed.
+# - Uses production signing secrets only in this workflow.
+# - Does not upload automatically to Google Play.
 
 on:
   workflow_dispatch: {}
@@ -22,6 +20,7 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -32,188 +31,270 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
 
-      - name: Get packages (uses committed pubspec.lock — no drift)
+      - name: Get packages
         run: flutter pub get
 
       - name: Static analysis
         run: flutter analyze
 
-      - name: Full regression test suite — must pass before any release build
+      - name: Full regression test suite
         run: flutter test
 
-      # ------------------------------------------------------------------
-      # فك تشفير الـkeystore الحقيقي من GitHub Secret. الملف بيتكوّن هنا
-      # بس وقتيًا جوه الـrunner، ومبيتحطش أبدًا في الريبو ولا يتسجل في
-      # أي log (استخدمنا --decode مش echo عشان محتواه ميظهرش في الـlog).
-      # ------------------------------------------------------------------
+      # ---------------------------------------------------------------
+      # Decode the production keystore from GitHub Secrets.
+      # ---------------------------------------------------------------
       - name: Decode keystore from GitHub Secret
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "❌ Secret ANDROID_KEYSTORE_BASE64 غير موجود — لازم يتضاف في GitHub Secrets قبل تشغيل الـrelease build."
+          set -euo pipefail
+
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "ERROR: ANDROID_KEYSTORE_BASE64 secret is missing."
             exit 1
           fi
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/release.keystore
 
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" \
+            | base64 --decode > android/release.keystore
+
+          if [ ! -s android/release.keystore ]; then
+            echo "ERROR: Decoded keystore is empty."
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # Write the signing configuration.
+      # printf preserves characters such as '=' in secret values.
+      # ---------------------------------------------------------------
       - name: Write key.properties from GitHub Secrets
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
-            echo "❌ واحد أو أكتر من KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD مش موجود في GitHub Secrets."
+          set -euo pipefail
+
+          if [ -z "${KEYSTORE_PASSWORD:-}" ] || \
+             [ -z "${KEY_ALIAS:-}" ] || \
+             [ -z "${KEY_PASSWORD:-}" ]; then
+            echo "ERROR: One or more Android signing secrets are missing."
             exit 1
           fi
-          cat > android/key.properties << EOF
-          storePassword=$KEYSTORE_PASSWORD
-          keyPassword=$KEY_PASSWORD
-          keyAlias=$KEY_ALIAS
-          storeFile=release.keystore
-          EOF
 
-      - name: Build Release AAB (this is the artifact we publish to Google Play)
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=release.keystore\n' \
+            "$KEYSTORE_PASSWORD" \
+            "$KEY_PASSWORD" \
+            "$KEY_ALIAS" > android/key.properties
+
+      # ---------------------------------------------------------------
+      # Build the signed release artifacts.
+      # ---------------------------------------------------------------
+      - name: Build Release AAB
         run: flutter build appbundle --release
 
-      - name: Also build a Release APK (manual testing only, not for Play)
+      - name: Build Release APK for manual testing
         run: flutter build apk --release
 
       - name: Confirm AAB was actually produced
         run: |
+          set -euo pipefail
+
           AAB_PATH="build/app/outputs/bundle/release/app-release.aab"
+
           if [ ! -f "$AAB_PATH" ]; then
-            echo "❌ AAB مش موجود في $AAB_PATH — الـbuild فشل أو المسار اتغيّر."
+            echo "ERROR: AAB was not produced at $AAB_PATH"
             exit 1
           fi
-          echo "✅ AAB موجود: $AAB_PATH ($(du -h "$AAB_PATH" | cut -f1))"
 
-      # ------------------------------------------------------------------
-      # التحقق الحقيقي إن الـAAB موقّع بتوقيع release مش debug: نستخدم
-      # bundletool نبني منه universal APK، وبعدين apksigner (جوه Android
-      # SDK اللي جاي مع الـrunner) للتحقق من شهادة التوقيع.
-      # ------------------------------------------------------------------
+          echo "AAB successfully produced."
+          du -h "$AAB_PATH"
+
+      # ---------------------------------------------------------------
+      # Download bundletool and verify that it can run.
+      # ---------------------------------------------------------------
       - name: Download bundletool
         run: |
           set -euo pipefail
 
-          BUNDLETOOL_URL=$(curl -fsSL \
-            https://api.github.com/repos/google/bundletool/releases/latest \
-            | jq -r '.assets[] | select(.name | test("^bundletool-all-.*\\.jar$")) | .browser_download_url' \
-            | head -n 1)
+          BUNDLETOOL_URL="$(
+            curl -fsSL \
+              https://api.github.com/repos/google/bundletool/releases/latest \
+              | jq -r '[.assets[] | select(.name | test("^bundletool-all-.*\\.jar$"))][0].browser_download_url // empty'
+          )"
 
           if [ -z "$BUNDLETOOL_URL" ]; then
-            echo "ERROR: Could not find bundletool JAR."
+            echo "ERROR: Could not find the official bundletool JAR."
             exit 1
           fi
 
-          curl -fL --retry 3 "$BUNDLETOOL_URL" -o bundletool.jar
+          curl -fL --retry 3 \
+            "$BUNDLETOOL_URL" \
+            -o bundletool.jar
 
-          test -s bundletool.jar
+          if [ ! -s bundletool.jar ]; then
+            echo "ERROR: Downloaded bundletool JAR is empty."
+            exit 1
+          fi
+
           java -jar bundletool.jar version
 
-      - name: Build a universal APK from the AAB for signature inspection
+      # ---------------------------------------------------------------
+      # Verify that the AAB signing certificate matches the certificate
+      # belonging to the configured release-keystore alias.
+      # ---------------------------------------------------------------
+      - name: Verify AAB signing certificate
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          java -jar bundletool.jar build-apks \
-            --bundle=build/app/outputs/bundle/release/app-release.aab \
-            --output=release_check.apks \
-            --mode=universal \
-            --ks=android/release.keystore \
-            --ks-pass=pass:$(grep storePassword android/key.properties | cut -d= -f2) \
-            --ks-key-alias=$(grep keyAlias android/key.properties | cut -d= -f2) \
-            --key-pass=pass:$(grep keyPassword android/key.properties | cut -d= -f2)
-          unzip -o release_check.apks -d release_check_extracted
+          set -euo pipefail
 
-      - name: Verify signing certificate is NOT the Flutter/Android debug key
-        run: |
-          APKSIGNER=$(find "$ANDROID_HOME" -name apksigner | sort -V | tail -1)
-          if [ -z "$APKSIGNER" ]; then
-            echo "❌ apksigner مش موجود على الـrunner — مش هينفع نتأكد من التوقيع آليًا."
+          AAB_PATH="build/app/outputs/bundle/release/app-release.aab"
+
+          EXPECTED_CERT_SHA256="$(
+            keytool -exportcert \
+              -keystore android/release.keystore \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" \
+              | sha256sum \
+              | awk '{print $1}'
+          )"
+
+          # Verify the AAB's JAR signature and read its signer certificate.
+          jarsigner -verify "$AAB_PATH"
+
+          AAB_CERT_SHA256="$(
+            keytool -printcert -jarfile "$AAB_PATH" \
+              | awk '/SHA256:/ {print $2; exit}' \
+              | tr -d ':' \
+              | tr '[:upper:]' '[:lower:]'
+          )"
+
+          if [ -z "$AAB_CERT_SHA256" ]; then
+            echo "ERROR: Could not read the AAB signing certificate."
             exit 1
           fi
-          echo "Using apksigner at: $APKSIGNER"
-          "$APKSIGNER" verify --print-certs release_check_extracted/universal.apk | tee signer_info.txt
 
-          # شهادة الـdebug الافتراضية لـFlutter/Android Studio معروفة
-          # ومكررة على كل الأجهزة (alias دايمًا "androiddebugkey"، ومفيش
-          # أي طريقة يبقى اسمها كده لو التوقيع Release حقيقي بمفتاحك انت).
-          if grep -qi "androiddebugkey" signer_info.txt; then
-            echo "❌ الـAAB متوقّع بمفتاح debug الافتراضي، مش بالـkeystore الحقيقي!"
+          if [ "$EXPECTED_CERT_SHA256" != "$AAB_CERT_SHA256" ]; then
+            echo "ERROR: AAB signing certificate does not match the configured release keystore."
             exit 1
           fi
-          echo "✅ Signing verification PASSED — الـAAB متوقّع بمفتاح release حقيقي، مش debug."
 
-      # ------------------------------------------------------------------
-      # قياس الحجم الحقيقي لكل جهاز — من غير أي حساب Google Play Console.
-      # bundletool هي نفس الأداة اللي Play Store بيستخدمها داخليًا لحساب
-      # الـ Dynamic Delivery، فالنتيجة هنا مطابقة لما هيوصل فعليًا لكل
-      # مستخدم، مش تقدير. لازم --mode=default (مش universal زي الخطوة
-      # اللي فوق) عشان نحصل على نفس الـ splits (ABI/كثافة/لغة) اللي
-      # Play Store هيوزّعها فعليًا، مش ملف واحد مجمّع.
-      # ------------------------------------------------------------------
-      - name: Build a split APK set from the AAB (for real per-device size measurement)
+          echo "AAB signing certificate matches the configured release keystore."
+
+      # ---------------------------------------------------------------
+      # Build an APK set using the release key.
+      # Passwords are passed directly from environment variables.
+      # Do NOT extract passwords with cut -d= -f2: passwords containing
+      # '=' would be truncated.
+      # ---------------------------------------------------------------
+      - name: Build split APK set for download-size measurement
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+
           java -jar bundletool.jar build-apks \
             --bundle=build/app/outputs/bundle/release/app-release.aab \
             --output=release_size_check.apks \
+            --mode=default \
             --ks=android/release.keystore \
-            --ks-pass=pass:$(grep storePassword android/key.properties | cut -d= -f2) \
-            --ks-key-alias=$(grep keyAlias android/key.properties | cut -d= -f2) \
-            --key-pass=pass:$(grep keyPassword android/key.properties | cut -d= -f2)
+            "--ks-pass=pass:${KEYSTORE_PASSWORD}" \
+            "--ks-key-alias=${KEY_ALIAS}" \
+            "--key-pass=pass:${KEY_PASSWORD}"
 
-      - name: Compute real per-device download size (bundletool get-size)
+          if [ ! -s release_size_check.apks ]; then
+            echo "ERROR: bundletool did not produce the APK set."
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # Estimate compressed download size across device configurations.
+      # These values are estimates, not a guarantee of the final
+      # Google Play listing's displayed download size.
+      # ---------------------------------------------------------------
+      - name: Compute per-device download-size estimates
         run: |
-          echo "--- Overall MIN/MAX across all device configs (bytes) ---"
-          java -jar bundletool.jar get-size total --apks=release_size_check.apks | tee size_total.csv
+          set -euo pipefail
+
+          echo "--- Overall MIN/MAX across device configurations (bytes) ---"
+
+          java -jar bundletool.jar get-size total \
+            --apks=release_size_check.apks \
+            | tee size_total.csv
 
           echo ""
           echo "--- Breakdown by ABI (bytes) ---"
-          java -jar bundletool.jar get-size total --apks=release_size_check.apks --dimensions=ABI | tee size_by_abi.csv
+
+          java -jar bundletool.jar get-size total \
+            --apks=release_size_check.apks \
+            --dimensions=ABI \
+            | tee size_by_abi.csv
 
           {
-            echo "## 📦 حجم التطبيق الحقيقي لكل جهاز (bundletool get-size)"
+            echo "## 📦 تقدير حجم تنزيل التطبيق"
             echo ""
-            echo "القيم دي بالظبط اللي هتوصل لمستخدم Play Store الحقيقي (Dynamic"
-            echo "Delivery) — مش تقدير، ومش حجم الـ debug APK الكلي."
+            echo "الحجم محسوب باستخدام bundletool من ملفات APK المشتقة من الـ AAB."
+            echo "النتيجة تقديرية وقد تختلف عن الحجم النهائي المعروض في Google Play."
             echo ""
-            echo "### الإجمالي (أصغر وأكبر تهيئة جهاز)"
+            echo "### الإجمالي — أصغر وأكبر حجم محسوب"
+            echo ""
             echo '```csv'
             cat size_total.csv
             echo '```'
             echo ""
-            echo "### حسب الـ ABI"
+            echo "### حسب معمارية المعالج (ABI)"
+            echo ""
             echo '```csv'
             cat size_by_abi.csv
             echo '```'
             echo ""
-            echo "_الأعمدة MIN/MAX بالبايت — اقسمها على 1048576 للميجابايت._"
+            echo "الأحجام بالبايت. للتحويل إلى MiB اقسم الرقم على 1048576."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Read applicationId / versionName / versionCode from source (for the report)
+      # ---------------------------------------------------------------
+      # Include application metadata in the workflow logs.
+      # ---------------------------------------------------------------
+      - name: Read application metadata
         run: |
-          echo "--- pubspec.yaml version line ---"
-          grep "^version:" pubspec.yaml
-          echo "--- applicationId ---"
-          grep "applicationId" android/app/build.gradle android/app/build.gradle.kts 2>/dev/null | head -3
+          set -euo pipefail
 
-      - name: Clean up secrets from the runner filesystem
+          echo "--- pubspec.yaml version ---"
+          grep '^version:' pubspec.yaml
+
+          echo "--- applicationId ---"
+          grep "applicationId" \
+            android/app/build.gradle \
+            android/app/build.gradle.kts 2>/dev/null \
+            | head -3 || true
+
+      # ---------------------------------------------------------------
+      # Remove temporary signing files and measurement artifacts.
+      # The GitHub-hosted runner is also discarded after the job ends.
+      # ---------------------------------------------------------------
+      - name: Clean up temporary signing files
         if: always()
         run: |
-          rm -f android/release.keystore android/key.properties release_check.apks bundletool.jar
-          rm -f release_size_check.apks size_total.csv size_by_abi.csv
-          rm -rf release_check_extracted
+          rm -f \
+            android/release.keystore \
+            android/key.properties \
+            bundletool.jar \
+            release_size_check.apks \
+            size_total.csv \
+            size_by_abi.csv
 
-      - name: Upload signed AAB + APK as workflow artifacts
+      # ---------------------------------------------------------------
+      # Publish the generated AAB and APK as downloadable workflow
+      # artifacts. This does not upload anything to Google Play.
+      # ---------------------------------------------------------------
+      - name: Upload signed AAB and APK as workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mahfazty-release-${{ github.run_number }}
           path: |
             build/app/outputs/bundle/release/app-release.aab
             build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
           retention-days: 90
-
-  # ---------------------------------------------------------------------
-  # ملحوظة: مفيش أي خطوة هنا بترفع على Google Play Console تلقائيًا —
-  # النتيجة النهائية artifact قابل للتحميل من الـworkflow run بس، والرفع
-  # الفعلي على Play هيبقى خطوة يدوية بعد الـFinal Audit (المرحلة الأخيرة).
-  # ---------------------------------------------------------------------
