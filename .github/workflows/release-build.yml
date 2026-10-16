@@ -93,7 +93,7 @@ jobs:
       # bundletool نبني منه universal APK، وبعدين apksigner (جوه Android
       # SDK اللي جاي مع الـrunner) للتحقق من شهادة التوقيع.
       # ------------------------------------------------------------------
-           - name: Download bundletool
+      - name: Download bundletool
         run: |
           set -euo pipefail
 
