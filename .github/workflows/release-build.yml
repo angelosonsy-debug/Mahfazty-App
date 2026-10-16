@@ -93,10 +93,24 @@ jobs:
       # bundletool نبني منه universal APK، وبعدين apksigner (جوه Android
       # SDK اللي جاي مع الـrunner) للتحقق من شهادة التوقيع.
       # ------------------------------------------------------------------
-      - name: Download bundletool
+           - name: Download bundletool
         run: |
-          curl -sSL -o bundletool.jar \
-            https://github.com/google/bundletool/releases/latest/download/bundletool-all.jar
+          set -euo pipefail
+
+          BUNDLETOOL_URL=$(curl -fsSL \
+            https://api.github.com/repos/google/bundletool/releases/latest \
+            | jq -r '.assets[] | select(.name | test("^bundletool-all-.*\\.jar$")) | .browser_download_url' \
+            | head -n 1)
+
+          if [ -z "$BUNDLETOOL_URL" ]; then
+            echo "ERROR: Could not find bundletool JAR."
+            exit 1
+          fi
+
+          curl -fL --retry 3 "$BUNDLETOOL_URL" -o bundletool.jar
+
+          test -s bundletool.jar
+          java -jar bundletool.jar version
 
       - name: Build a universal APK from the AAB for signature inspection
         run: |
