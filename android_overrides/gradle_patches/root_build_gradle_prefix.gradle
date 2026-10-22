@@ -1,0 +1,5 @@
+// mahfazty: google_mobile_ads Gradle 8.11+ compatibility patch
+// راجع الشرح في mahfazty_gma_shim.gradle جمب الملف ده.
+apply from: 'mahfazty_gma_shim.gradle'
+apply from: 'mahfazty_compile_sdk_enforcement.gradle'
+
