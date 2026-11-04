@@ -296,7 +296,9 @@ class FinancialEngine extends ChangeNotifier {
       final incomingReference = newEvent.reference?.trim();
       if (existingReference == null || existingReference.isEmpty ||
           incomingReference == null || incomingReference.isEmpty ||
-          existingReference != incomingReference) return false;
+          existingReference != incomingReference) {
+        return false;
+      }
       if (e.walletId != null && newEvent.walletId != null && e.walletId != newEvent.walletId) {
         return false;
       }
