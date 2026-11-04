@@ -294,10 +294,13 @@ class FinancialEngine extends ChangeNotifier {
       // تلقائيًا إلا عند وجود مرجع غير فارغ ومتطابق من المصدرين.
       final existingReference = e.reference?.trim();
       final incomingReference = newEvent.reference?.trim();
-      if (existingReference == null || existingReference.isEmpty ||
-          incomingReference == null || incomingReference.isEmpty ||
+            final existingReference = e.reference?.trim();
+      final incomingReference = newEvent.reference?.trim();
+      if (existingReference != null && existingReference.isNotEmpty &&
+          incomingReference != null && incomingReference.isNotEmpty &&
           existingReference != incomingReference) {
         return false;
+      }
       }
       if (e.walletId != null && newEvent.walletId != null && e.walletId != newEvent.walletId) {
         return false;
