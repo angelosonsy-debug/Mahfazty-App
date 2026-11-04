@@ -1,0 +1,144 @@
+name: Bootstrap Android Project (run once)
+
+# هذا الـ workflow بيتشغّل يدويًا بس (مش على كل push) — مهمته الوحيدة:
+# توليد مشروع Flutter/Android حقيقي مرة واحدة، ولزقه دائمًا داخل الريبو
+# (android/, pubspec.lock)، بحيث الـ workflow التاني (build-apk.yml)
+# ميحتاجش "flutter create" أو "flutter pub add" تاني إطلاقًا.
+#
+# شغّله مرة واحدة الآن، وبعد كده مرة تانية بس لو حبينا نغيّر نسخة
+# Flutter نفسها مستقبلًا (نادر) — مش جزء من دورة التطوير العادية.
+
+on:
+  workflow_dispatch: {}
+
+# صلاحية الكتابة مطلوبة عشان الخطوة الأخيرة تعمل commit للنتيجة
+permissions:
+  contents: write
+
+# نفس النسخة المثبتة في build-apk.yml — لازم تتطابق دايمًا
+env:
+  FLUTTER_VERSION: '3.44.7'
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter (pinned version)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Generate a fresh Flutter/Android skeleton in a temp folder
+        run: |
+          flutter create --platforms=android --org com.mahfazty --project-name mahfazty /tmp/bootstrap_app
+
+      - name: Copy the real Android project into the repo
+        run: |
+          rm -rf android
+          cp -r /tmp/bootstrap_app/android android
+
+      - name: Apply our custom Android overrides (manifest + Kotlin files)
+        run: |
+          cp android_overrides/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/kotlin/com/mahfazty/mahfazty
+          cp android_overrides/kotlin/MainActivity.kt android/app/src/main/kotlin/com/mahfazty/mahfazty/MainActivity.kt
+          cp android_overrides/kotlin/MahfaztyNotificationListener.kt android/app/src/main/kotlin/com/mahfazty/mahfazty/MahfaztyNotificationListener.kt
+          cp android_overrides/kotlin/SmsReceiver.kt android/app/src/main/kotlin/com/mahfazty/mahfazty/SmsReceiver.kt
+
+      - name: Inject google_mobile_ads Gradle-level compatibility shim
+        # shim بيرجّع configurations.all() كـ method حقيقية — بدل
+        # محاولة تخمين شكل كود المكتبة بالظبط عشان نمسحه. راجع
+        # android_overrides/gradle_patches/configurations_all_shim.gradle
+        run: |
+          cp android_overrides/gradle_patches/configurations_all_shim.gradle android/mahfazty_gma_shim.gradle
+          cp android_overrides/gradle_patches/compile_sdk_enforcement.gradle android/mahfazty_compile_sdk_enforcement.gradle
+          MARKER="// mahfazty: google_mobile_ads Gradle 8.11+ compatibility patch"
+          ROOT_GRADLE="android/build.gradle.kts"
+          PREFIX="android_overrides/gradle_patches/root_build_gradle_prefix.kts"
+          if [ ! -f "$ROOT_GRADLE" ]; then
+            ROOT_GRADLE="android/build.gradle"
+            PREFIX="android_overrides/gradle_patches/root_build_gradle_prefix.gradle"
+          fi
+          echo "Target: $ROOT_GRADLE"
+          if grep -qF "$MARKER" "$ROOT_GRADLE" 2>/dev/null; then
+            echo "Patch already present in $ROOT_GRADLE — skipping (shim file refreshed anyway)"
+          else
+            cat "$PREFIX" "$ROOT_GRADLE" > /tmp/patched_root_gradle
+            mv /tmp/patched_root_gradle "$ROOT_GRADLE"
+            echo "Injected. First 6 lines of $ROOT_GRADLE now:"
+            head -6 "$ROOT_GRADLE"
+          fi
+
+      - name: Pin compileSdk / targetSdk / minSdk explicitly (Google Play 2026 requirement)
+        run: |
+          BUILD_GRADLE="android/app/build.gradle.kts"
+          if [ ! -f "$BUILD_GRADLE" ]; then
+            BUILD_GRADLE="android/app/build.gradle"
+          fi
+          echo "Patching $BUILD_GRADLE"
+          # نستبدل أي إشارة لـ flutter.compileSdkVersion / flutter.targetSdkVersion
+          # / flutter.minSdkVersion بأرقام صريحة ثابتة، بدل الاعتماد على
+          # افتراضيات Flutter الداخلية اللي ممكن تتغير مع كل نسخة.
+          sed -i \
+            -e 's/flutter\.compileSdkVersion/36/g' \
+            -e 's/flutter\.targetSdkVersion/36/g' \
+            -e 's/flutter\.minSdkVersion/23/g' \
+            "$BUILD_GRADLE"
+          echo "--- Result ---"
+          grep -n "Sdk" "$BUILD_GRADLE" || true
+
+      - name: Enable core library desugaring (required by flutter_local_notifications)
+        # من v13+، flutter_local_notifications بيحتاج هذا مفعّل في :app
+        # — راجع android_overrides/gradle_patches/app_build_gradle_suffix.kts
+        run: |
+          MARKER="// mahfazty: flutter_local_notifications requires core library desugaring"
+          APP_GRADLE="android/app/build.gradle.kts"
+          SUFFIX="android_overrides/gradle_patches/app_build_gradle_suffix.kts"
+          if [ ! -f "$APP_GRADLE" ]; then
+            APP_GRADLE="android/app/build.gradle"
+            SUFFIX="android_overrides/gradle_patches/app_build_gradle_suffix.gradle"
+          fi
+          if grep -qF "$MARKER" "$APP_GRADLE" 2>/dev/null; then
+            echo "✅ core library desugaring block already present in $APP_GRADLE"
+          else
+            cat "$SUFFIX" >> "$APP_GRADLE"
+            echo "✅ Appended core library desugaring block to $APP_GRADLE"
+          fi
+
+      - name: Add real release signing config (C2) + key.properties template
+        run: |
+          python3 tool/apply_release_signing.py
+          cp android_overrides/key.properties.template android/key.properties.template
+          # key.properties الحقيقي (لو حد أنشأه محليًا) ميترفعش للريبو أبدًا
+          if ! grep -qxF "android/key.properties" .gitignore 2>/dev/null; then
+            printf '\n# Release signing secret — never commit the real file\nandroid/key.properties\n*.keystore\n*.jks\n' >> .gitignore
+          fi
+
+      - name: flutter pub get (generates the real pubspec.lock)
+        run: flutter pub get
+
+      # ملحوظة: مافيش خطوة "Fix google_mobile_ads" هنا عمدًا — الملف ده
+      # بيولّد android/ + pubspec.lock بس وميعملش أي Gradle build (الخطوة
+      # اللي جاية بعد كده flutter analyze / flutter test بيشتغلوا على طبقة
+      # Dart بس من غير ما يلمسوا Android Gradle إطلاقًا). الباتش الفعلي
+      # بيحصل في build-apk.yml قبل "Build debug APK" مباشرة، لأن pub
+      # ممكن يكتشف تعديل على باكدج مُستخرج ويرجّعه تلقائيًا لو أي أمر
+      # flutter/dart اتنفذ بعد الباتش — فالمكان الوحيد الآمن للباتش هو
+      # آخر خطوة قبل Gradle build على طول.
+
+      - name: Sanity check — analyze + test on the bootstrapped project
+        run: |
+          flutter analyze
+          flutter test
+
+      - name: Commit the bootstrapped project back to the repo
+        run: |
+          git config user.name "mahfazty-bootstrap-bot"
+          git config user.email "actions@github.com"
+          git add android pubspec.lock .gitignore
+          git diff --cached --quiet && echo "No changes to commit" || git commit -m "chore: bootstrap real Flutter/Android project + release signing config (automated, C4+C2)"
+          git push

@@ -1,0 +1,50 @@
+// mahfazty: enforce a minimum compileSdk across ALL Android subprojects
+// ─────────────────────────────────────────────────────────────────────
+// الخطأ اللي ظهر: google_mobile_ads نفسها متبنية ضد compileSdk 34،
+// لكن واحدة من اعتماداتها الفرعية (webview_flutter_android) بتطلب 36+.
+// كل موديول (plugin) في مشروع Gradle متعدد الموديولات بيعلن compileSdk
+// بتاعه بنفسه، مستقل تمامًا عن compileSdk بتاع تطبيقنا الرئيسي (:app)
+// — فرفع compileSdk بتاعنا احنا (زي ما عملنا فعلاً، 36) مش كافي، لازم
+// أي موديول فرعي (plugin) قديم يترفع كمان.
+//
+// الحل: بدل ما نستهدف google_mobile_ads بس (زي الإصلاحات اللي فاتت)،
+// بنعمم الحل على *كل* موديول Android فرعي (library أو application) —
+// تحصين استباقي: أي plugin تاني (دلوقتي أو مستقبلاً بعد تحديث) ممكن
+// يقع في نفس المشكلة دي بالظبط لو هو كمان متبني ضد API قديم.
+//
+// بنستخدم subprojects { afterEvaluate { ... } } — ده بيضمن إن الـ
+// override بتاعنا يتسجّل *قبل* ما سكريبت الموديول الفرعي نفسه يتنفذ
+// (فبيسبق أي afterEvaluate داخلي مسجّله AGP نفسه)، لكن القيمة الفعلية
+// بتتقرا وتتغيّر *بعد* ما android{} block بتاع الموديول يتقرا (وقت
+// التنفيذ الفعلي لـ afterEvaluate)، فمش محتاجين نلمس أو نحلّل كود
+// المكتبة خالص — بنغيّر القيمة من جوه AGP نفسه.
+def mahfaztyMinCompileSdk = 36
+
+subprojects {
+    afterEvaluate { proj ->
+        def androidExt = proj.extensions.findByName('android')
+        if (androidExt == null) {
+            return
+        }
+        try {
+            def current = androidExt.compileSdkVersion
+            // compileSdkVersion ممكن ترجع String ("android-34") أو int
+            // (34) حسب نسخة AGP بالظبط — بنتعامل مع الاتنين.
+            def currentLevel = 0
+            if (current instanceof String) {
+                def m = (current =~ /\d+/)
+                if (m.find()) {
+                    currentLevel = m.group().toInteger()
+                }
+            } else if (current instanceof Number) {
+                currentLevel = current.intValue()
+            }
+            if (currentLevel > 0 && currentLevel < mahfaztyMinCompileSdk) {
+                androidExt.compileSdkVersion(mahfaztyMinCompileSdk)
+                println "[mahfazty] Raised ${proj.name} compileSdk ${currentLevel} -> ${mahfaztyMinCompileSdk}"
+            }
+        } catch (Throwable t) {
+            println "[mahfazty] WARNING: could not check/raise compileSdk for ${proj.name}: ${t.message}"
+        }
+    }
+}
