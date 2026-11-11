@@ -78,27 +78,40 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # keytool -list -v بيعرض بيانات الشهادة العامة بس من غير ما يحتاج
-          # يفك تشفير المفتاح الخاص فعليًا - يعني KEY_PASSWORD غلط كان بيعدّي
-          # من هنا بصمت، والمشكلة كانت بتظهر متأخر وغامضة عند bundletool.
-          # -changealias بنفس الـ alias (مصدر = هدف) عملية آمنة ومحايدة لكنها
-          # لازم تفك وتعيد تشفير المفتاح الخاص فعليًا، فبتثبت KEY_PASSWORD
-          # صح بشكل حقيقي، مش بس KEYSTORE_PASSWORD.
-          cp android/release.keystore android/release.keystore.checkcopy
-          if ! keytool -changealias \
-              -alias "$KEY_ALIAS" \
-              -destalias "$KEY_ALIAS" \
-              -keystore android/release.keystore.checkcopy \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -keypass "$KEY_PASSWORD" 2>keytool_error.txt; then
-            echo "❌ فشل فك تشفير المفتاح - KEY_PASSWORD غلط (أو مش مطابق لكلمة سر المفتاح الفعلية في الـ keystore)."
-            echo "   لو الـ keystore اتعمل من غير -keypass صريح، كلمة سر المفتاح = كلمة سر الـ keystore نفسها."
-            cat keytool_error.txt
+          KEYSTORE_TYPE=$(keytool -list -storepass "$KEYSTORE_PASSWORD" -keystore android/release.keystore 2>/dev/null | grep "Keystore type:" | awk '{print $NF}')
+          echo "Keystore type: $KEYSTORE_TYPE"
+
+          if [ "$KEYSTORE_TYPE" = "PKCS12" ]; then
+            # PKCS12 (الافتراضي من keytool الحديث) ما بيدعمش كلمة سر منفصلة
+            # للمفتاح أصلًا - keytool بيتجاهل أي -keypass مختلف بصمت (مع
+            # تحذير) ويستخدم كلمة سر الـ keystore. فالفحص الوحيد اللي معناه
+            # فعليًا هنا هو تطابق القيمتين حرفيًا.
+            if [ "$KEYSTORE_PASSWORD" != "$KEY_PASSWORD" ]; then
+              echo "❌ الـ keystore من نوع PKCS12، وده الفورمات ما بيدعمش كلمة سر"
+              echo "   منفصلة للمفتاح. KEY_PASSWORD لازم يكون مطابق تمامًا لـ"
+              echo "   KEYSTORE_PASSWORD - راجع الـ secret وصحّحه."
+              exit 1
+            fi
+            echo "✅ PKCS12: KEYSTORE_PASSWORD و KEY_PASSWORD متطابقين (المطلوب لهذا الفورمات)."
+          else
+            # فورمات غير PKCS12 (JKS قديم مثلًا) بيسمح بكلمة سر منفصلة فعليًا -
+            # نختبرها بفك تشفير حقيقي عبر -changealias لاسم مؤقت فريد على
+            # نسخة مؤقتة (مش هيأثر على الملف الأصلي).
+            cp android/release.keystore android/release.keystore.checkcopy
+            if ! keytool -changealias \
+                -alias "$KEY_ALIAS" \
+                -destalias "__mahfazty_check__" \
+                -keystore android/release.keystore.checkcopy \
+                -storepass "$KEYSTORE_PASSWORD" \
+                -keypass "$KEY_PASSWORD" 2>keytool_error.txt; then
+              echo "❌ فشل فك تشفير المفتاح - KEY_PASSWORD غلط."
+              cat keytool_error.txt
+              rm -f android/release.keystore.checkcopy keytool_error.txt
+              exit 1
+            fi
             rm -f android/release.keystore.checkcopy keytool_error.txt
-            exit 1
+            echo "✅ Keystore + key password + alias all valid (private key decryption confirmed)."
           fi
-          rm -f android/release.keystore.checkcopy keytool_error.txt
-          echo "✅ Keystore + key password + alias all valid (private key decryption confirmed)."
 
       - name: Print release SHA-1 (for Google Cloud Console OAuth client setup)
         env:
