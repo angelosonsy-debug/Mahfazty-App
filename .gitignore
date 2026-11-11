@@ -1,0 +1,5 @@
+
+# Release signing secret — never commit the real file
+android/key.properties
+*.keystore
+*.jks
