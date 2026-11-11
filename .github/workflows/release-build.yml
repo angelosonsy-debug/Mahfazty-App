@@ -75,6 +75,31 @@ jobs:
             > /dev/null
           echo "✅ Keystore + key password + alias all valid."
 
+      - name: Print release SHA-1 (for Google Cloud Console OAuth client setup)
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          keytool -list -v \
+            -keystore android/release.keystore \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -alias "$KEY_ALIAS" \
+            -keypass "$KEY_PASSWORD" \
+            > keystore_info.txt
+          SHA1=$(grep "SHA1:" keystore_info.txt | head -1 | sed 's/.*SHA1: //')
+          {
+            echo "## 🔑 Release SHA-1 (سجّلها في Google Cloud Console — OAuth client نوع Android)"
+            echo ""
+            echo "\`\`\`"
+            echo "$SHA1"
+            echo "\`\`\`"
+            echo ""
+            echo "ثابتة طول ما نفس الـ keystore (secret \`ANDROID_KEYSTORE_BASE64\`) هو اللي بيتستخدم —"
+            echo "مش محتاج تستخرجها تاني في كل تشغيل، سجّلها مرة واحدة بس."
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -f keystore_info.txt
+
       - name: Build Release AAB (this is the artifact we publish to Google Play)
         run: flutter build appbundle --release
 
