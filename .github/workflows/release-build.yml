@@ -19,6 +19,17 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Confirm the Android project exists (Bootstrap must run first)
+        run: |
+          if [ ! -d "android" ] || [ ! -f "pubspec.lock" ]; then
+            echo "❌ فولدر android/ و/أو pubspec.lock مش موجودين في الريبو."
+            echo "   لازم تشغّل workflow 'Bootstrap Android Project (run once)' يدويًا"
+            echo "   من تبويب Actions الأول (مرة واحدة بس)، واستنى لحد ما يعمل commit"
+            echo "   لـ android/ و pubspec.lock على الريبو، وبعدين شغّل Release Build تاني."
+            exit 1
+          fi
+          echo "✅ android/ و pubspec.lock موجودين."
+
       - name: Set up Flutter (pinned version)
         uses: subosito/flutter-action@v2
         with:
@@ -67,13 +78,27 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          keytool -list -v \
-            -keystore android/release.keystore \
-            -storepass "$KEYSTORE_PASSWORD" \
-            -alias "$KEY_ALIAS" \
-            -keypass "$KEY_PASSWORD" \
-            > /dev/null
-          echo "✅ Keystore + key password + alias all valid."
+          # keytool -list -v بيعرض بيانات الشهادة العامة بس من غير ما يحتاج
+          # يفك تشفير المفتاح الخاص فعليًا - يعني KEY_PASSWORD غلط كان بيعدّي
+          # من هنا بصمت، والمشكلة كانت بتظهر متأخر وغامضة عند bundletool.
+          # -changealias بنفس الـ alias (مصدر = هدف) عملية آمنة ومحايدة لكنها
+          # لازم تفك وتعيد تشفير المفتاح الخاص فعليًا، فبتثبت KEY_PASSWORD
+          # صح بشكل حقيقي، مش بس KEYSTORE_PASSWORD.
+          cp android/release.keystore android/release.keystore.checkcopy
+          if ! keytool -changealias \
+              -alias "$KEY_ALIAS" \
+              -destalias "$KEY_ALIAS" \
+              -keystore android/release.keystore.checkcopy \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" 2>keytool_error.txt; then
+            echo "❌ فشل فك تشفير المفتاح - KEY_PASSWORD غلط (أو مش مطابق لكلمة سر المفتاح الفعلية في الـ keystore)."
+            echo "   لو الـ keystore اتعمل من غير -keypass صريح، كلمة سر المفتاح = كلمة سر الـ keystore نفسها."
+            cat keytool_error.txt
+            rm -f android/release.keystore.checkcopy keytool_error.txt
+            exit 1
+          fi
+          rm -f android/release.keystore.checkcopy keytool_error.txt
+          echo "✅ Keystore + key password + alias all valid (private key decryption confirmed)."
 
       - name: Print release SHA-1 (for Google Cloud Console OAuth client setup)
         env:
